@@ -147,8 +147,6 @@
 
 #define SABRESD_HEADPHONE_DET	IMX_GPIO_NR(7, 8)
 #define SABRESD_PCIE_RST_B_REVB	IMX_GPIO_NR(7, 12)
-#define SABRESD_PMIC_INT_B	IMX_GPIO_NR(7, 13)
-#define SABRESD_PFUZE_INT	IMX_GPIO_NR(7, 13)
 
 #define SABRESD_EPDC_SDDO_0	IMX_GPIO_NR(2, 22)
 #define SABRESD_EPDC_SDDO_1	IMX_GPIO_NR(3, 10)
@@ -1803,14 +1801,6 @@ static void __init mx6_sabresd_board_init(void)
 			ARRAY_SIZE(mxc_i2c1_board_info));
 	i2c_register_board_info(2, mxc_i2c2_board_info,
 			ARRAY_SIZE(mxc_i2c2_board_info));
-	ret = gpio_request(SABRESD_PFUZE_INT, "pFUZE-int");
-	if (ret) {
-		printk(KERN_ERR"request pFUZE-int error!!\n");
-		return;
-	} else {
-		gpio_direction_input(SABRESD_PFUZE_INT);
-		mx6q_sabresd_init_pfuze100(SABRESD_PFUZE_INT);
-	}
 	/* SPI */
 	imx6q_add_ecspi(0, &mx6q_sabresd_spi_data);
 	spi_device_init();
