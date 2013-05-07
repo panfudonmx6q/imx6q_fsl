@@ -67,6 +67,25 @@ int set_cpu_freq(int freq)
 	int soc_volt = 0;
 	int pu_volt = 0;
 
+        if (cpu_is_mx6()) {
+                #define HW_ANADIG_ANA_MISC2     0x00000170
+                #define BM_ANADIG_ANA_MISC2_REG0_STEP_TIME 0x03000000
+                #define BM_ANADIG_ANA_MISC2_REG1_STEP_TIME 0x0C000000
+                #define BM_ANADIG_ANA_MISC2_REG2_STEP_TIME 0x30000000 
+
+                void __iomem *anatop_base_addr = MX6_IO_ADDRESS(ANATOP_BASE_ADDR);
+                int reg = readl(anatop_base_addr + HW_ANADIG_ANA_MISC2);
+
+                /* Assume the STETP_TIME to 0b'00(64 cycles @ 24Mhz)for REG0/1/2 */
+                if (reg & (BM_ANADIG_ANA_MISC2_REG0_STEP_TIME |
+                                BM_ANADIG_ANA_MISC2_REG1_STEP_TIME |
+                                BM_ANADIG_ANA_MISC2_REG2_STEP_TIME))
+                        writel(reg & ~(BM_ANADIG_ANA_MISC2_REG0_STEP_TIME |
+                                        BM_ANADIG_ANA_MISC2_REG1_STEP_TIME |
+                                        BM_ANADIG_ANA_MISC2_REG2_STEP_TIME),
+                                        anatop_base_addr + HW_ANADIG_ANA_MISC2);
+        }
+
 	org_cpu_rate = clk_get_rate(cpu_clk);
 	if (org_cpu_rate == freq)
 		return ret;
