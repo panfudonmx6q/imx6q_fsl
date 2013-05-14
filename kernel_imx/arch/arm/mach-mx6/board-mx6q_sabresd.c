@@ -213,8 +213,7 @@ extern int epdc_enabled;
 static int max17135_regulator_init(struct max17135 *max17135);
 
 static const struct esdhc_platform_data mx6q_sabresd_sd2_data __initconst = {
-	.cd_gpio = SABRESD_SD2_CD,
-	.wp_gpio = SABRESD_SD2_WP,
+	.always_present = 1,
 	.keep_power_at_suspend = 1,
 	.support_8bit = 1,
 	.delay_line = 0,
