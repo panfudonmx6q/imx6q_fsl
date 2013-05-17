@@ -778,8 +778,4 @@ enum {
 
 int rt5631_headset_detect(struct snd_soc_codec *codec, int jack_insert);
 
-extern struct snd_soc_dai rt5631_dai[];
-extern struct snd_soc_codec_device soc_codec_dev_rt5631;
-
-
 #endif /* __RT5631_H__ */

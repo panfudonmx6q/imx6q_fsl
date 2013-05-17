@@ -30,7 +30,7 @@
 
 #include "rt5631.h"
 
-static struct snd_soc_codec *rt5631_codec;
+#define VERSION "0.3.0 alsa 1.0.24"
 
 struct rt5631_init_reg {
 	u8 reg;
@@ -80,7 +80,7 @@ static int rt5631_index_sync(struct snd_soc_codec *codec)
 }
 
 struct rt5631_priv {
-	struct snd_soc_codec codec;
+	struct snd_soc_codec *codec;
 	int codec_version;
 	int master[RT5631_AIFS];
 	int sysclk[RT5631_SCLKS];
@@ -219,7 +219,8 @@ static int rt5631_reset(struct snd_soc_codec *codec)
 	return snd_soc_write(codec, RT5631_RESET, 0);
 }
 
-static int rt5631_volatile_register(unsigned int reg)
+static int rt5631_volatile_register(struct snd_soc_codec *codec,
+				    unsigned int reg)
 {
 	switch (reg) {
 	case RT5631_RESET:
@@ -236,7 +237,8 @@ static int rt5631_volatile_register(unsigned int reg)
 	}
 }
 
-static int rt5631_readable_register(unsigned int reg)
+static int rt5631_readable_register(struct snd_soc_codec *codec,
+				    unsigned int reg)
 {
 	switch (reg) {
 	case RT5631_RESET:
@@ -460,6 +462,9 @@ static const struct snd_kcontrol_new rt5631_snd_controls[] = {
 	/* MONO OUT */
 	SOC_SINGLE("MONO Playback Switch", RT5631_MONO_AXO_1_2_VOL,
 				RT5631_MUTE_MONO_SHIFT, 1, 1),
+	SOC_DOUBLE_TLV("MONO Playback Volume", RT5631_MONO_AXO_1_2_VOL,
+		RT5631_L_VOL_SHIFT, RT5631_R_VOL_SHIFT,
+		RT5631_VOL_MASK, 1, out_vol_tlv),
 	/* HP */
 	SOC_DOUBLE("HP Playback Switch", RT5631_HP_OUT_VOL,
 		RT5631_L_MUTE_SHIFT, RT5631_R_MUTE_SHIFT, 1, 1),
@@ -1214,7 +1219,7 @@ static const struct snd_soc_dapm_widget rt5631_dapm_widgets[] = {
 	/* ADCs */
 	SND_SOC_DAPM_ADC("Left ADC", "HIFI Capture",
 		RT5631_PWR_MANAG_ADD1, RT5631_PWR_ADC_L_CLK_BIT, 0),
-	SND_SOC_DAPM_ADC("Right ADC", "HIFI Capture",
+	SND_SOC_DAPM_ADC("Right ADC", "Voice HIFI Capture",
 		RT5631_PWR_MANAG_ADD1, RT5631_PWR_ADC_R_CLK_BIT, 0),
 
 	/* DAC and ADC supply power */
@@ -1284,12 +1289,20 @@ static const struct snd_soc_dapm_widget rt5631_dapm_widgets[] = {
 			&rt5631_spkvolr_mux_control),
 
 	/* DAC To HP */
-	SND_SOC_DAPM_PGA("Left DAC_HP", SND_SOC_NOPM, 0, 0, NULL, 0),
-	SND_SOC_DAPM_PGA("Right DAC_HP", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_PGA_S("Left DAC_HP", 0, SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_PGA_S("Right DAC_HP", 0, SND_SOC_NOPM, 0, 0, NULL, 0),
 
 	/* HP Depop */
-	SND_SOC_DAPM_PGA_E("HP Depop", SND_SOC_NOPM, 0, 0, NULL, 0,
+	SND_SOC_DAPM_PGA_S("HP Depop", 1, SND_SOC_NOPM, 0, 0,
 		hp_event, SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMU),
+
+	/* SPK */
+	SND_SOC_DAPM_PGA_S("SPOL PGA", 2,RT5631_SPK_OUT_VOL,
+			RT5631_L_MUTE_SHIFT, 1,
+			NULL,0),
+	SND_SOC_DAPM_PGA_S("SPOR PGA", 2,RT5631_SPK_OUT_VOL,
+			RT5631_R_MUTE_SHIFT, 1,
+			NULL,0),
 
 	/* AXO1 Mixer */
 	SND_SOC_DAPM_MIXER("AXO1MIX Mixer", RT5631_PWR_MANAG_ADD3,
@@ -1493,10 +1506,12 @@ static const struct snd_soc_dapm_route rt5631_dapm_routes[] = {
 	{"AUXO1", NULL, "AXO1MIX Mixer"},
 	{"AUXO2", NULL, "AXO2MIX Mixer"},
 
-	{"SPOL", NULL, "Class D"},
-	{"SPOL", NULL, "SPOL Mux"},
-	{"SPOR", NULL, "Class D"},
-	{"SPOR", NULL, "SPOR Mux"},
+	{"SPOL PGA", NULL, "Class D"},
+	{"SPOL PGA", NULL, "SPOL Mux"},
+	{"SPOR PGA", NULL, "Class D"},
+	{"SPOR PGA", NULL, "SPOR Mux"},
+	{"SPOL", NULL, "SPOL PGA"},
+	{"SPOR", NULL, "SPOR PGA"},
 
 	{"HPOL", NULL, "HP Depop"},
 	{"HPOR", NULL, "HP Depop"},
@@ -1685,7 +1700,8 @@ static int get_coeff(int dai_id, int mclk, int rate, int timesofbclk)
 static int rt5631_hifi_pcm_params(struct snd_pcm_substream *substream,
 		struct snd_pcm_hw_params *params, struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_codec *codec = rtd->codec;
 	struct rt5631_priv *rt5631 = snd_soc_codec_get_drvdata(codec);
 	int timesofbclk = 32, coeff, sysclk;
 	unsigned int iface = 0, val;
@@ -1695,6 +1711,8 @@ static int rt5631_hifi_pcm_params(struct snd_pcm_substream *substream,
 	if (RT5631_AIF1 == dai->id) {
 		sysclk = rt5631->sysclk[RT5631_SCLK1];
 	} else if (RT5631_AIF2 == dai->id) {
+		snd_soc_update_bits(codec, RT5631_GLOBAL_CLK_CTRL,
+			RT5631_ADCR_FUN_MASK, RT5631_ADCR_FUN_VADC);
 		val = snd_soc_read(codec, RT5631_GLOBAL_CLK_CTRL);
 		if (val & RT5631_VDAC_CLK_SOUR_SCLK2)
 			sysclk = rt5631->sysclk[RT5631_SCLK2];
@@ -1813,10 +1831,10 @@ static int rt5631_hifi_codec_set_dai_fmt(
 	return 0;
 }
 
-static int rt5631_hifi_codec_set_dai_sysclk(struct snd_soc_dai *codec_dai,
+static int rt5631_hifi_codec_set_dai_sysclk(struct snd_soc_dai *dai,
 				int clk_id, unsigned int freq, int dir)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
+	struct snd_soc_codec *codec = dai->codec;
 	struct rt5631_priv *rt5631 = snd_soc_codec_get_drvdata(codec);
 
 	dev_dbg(codec->dev, "syclk[%d]: %d\n", clk_id, freq);
@@ -1912,45 +1930,27 @@ static int rt5631_codec_set_dai_pll(struct snd_soc_dai *dai, int pll_id,
 	return ret;
 }
 
-static void rt5631_sync_cache(struct snd_soc_codec *codec)
-{
-	const u16 *reg_cache = codec->reg_cache;
-	int i;
-
-	if (!codec->cache_sync)
-		return;
-
-	/* Sync back cached values if they're different from the
-	 * hardware default.
-	 */
-	for (i = 1; i < codec->reg_cache_size; i++) {
-		if (reg_cache[i] == rt5631_reg[i])
-			continue;
-		snd_soc_write(codec, i, reg_cache[i]);
-	}
-
-	codec->cache_sync = 0;
-}
-
 static int rt5631_set_bias_level(struct snd_soc_codec *codec,
 			enum snd_soc_bias_level level)
 {
 	switch (level) {
 	case SND_SOC_BIAS_ON:
-		snd_soc_update_bits(codec, RT5631_SPK_OUT_VOL,
-			RT5631_L_MUTE | RT5631_R_MUTE,0);
-		snd_soc_update_bits(codec, RT5631_HP_OUT_VOL,
-			RT5631_L_MUTE | RT5631_R_MUTE,0);
 		break;
 
 	case SND_SOC_BIAS_PREPARE:
+		snd_soc_update_bits(codec, RT5631_SPK_OUT_VOL,
+			RT5631_L_MUTE | RT5631_R_MUTE,
+			RT5631_L_MUTE | RT5631_R_MUTE);
+		snd_soc_update_bits(codec, RT5631_HP_OUT_VOL,
+			RT5631_L_MUTE | RT5631_R_MUTE,
+			RT5631_L_MUTE | RT5631_R_MUTE);
 		snd_soc_update_bits(codec, RT5631_PWR_MANAG_ADD2,
 			RT5631_PWR_MICBIAS1_VOL | RT5631_PWR_MICBIAS2_VOL,
 			RT5631_PWR_MICBIAS1_VOL | RT5631_PWR_MICBIAS2_VOL);
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (codec->bias_level == SND_SOC_BIAS_OFF) {
+		if (codec->dapm.bias_level == SND_SOC_BIAS_OFF) {
 			snd_soc_update_bits(codec, RT5631_PWR_MANAG_ADD3,
 				RT5631_PWR_VREF | RT5631_PWR_MAIN_BIAS,
 				RT5631_PWR_VREF | RT5631_PWR_MAIN_BIAS);
@@ -1959,7 +1959,8 @@ static int rt5631_set_bias_level(struct snd_soc_codec *codec,
 				RT5631_PWR_FAST_VREF_CTRL,
 				RT5631_PWR_FAST_VREF_CTRL);
 			codec->cache_only = false;
-			rt5631_sync_cache(codec);
+			codec->cache_sync = 1;
+			snd_soc_cache_sync(codec);
 			rt5631_index_sync(codec);
 		}
 		break;
@@ -1974,7 +1975,7 @@ static int rt5631_set_bias_level(struct snd_soc_codec *codec,
 	default:
 		break;
 	}
-	codec->bias_level = level;
+	codec->dapm.bias_level = level;
 
 	return 0;
 }
@@ -1994,7 +1995,7 @@ static ssize_t rt5631_index_show(struct device *dev,
 {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct rt5631_priv *rt5631 = i2c_get_clientdata(client);
-	struct snd_soc_codec *codec = &rt5631->codec;
+	struct snd_soc_codec *codec = rt5631->codec;
 	unsigned int val;
 	int cnt = 0, i;
 
@@ -2015,194 +2016,19 @@ static ssize_t rt5631_index_show(struct device *dev,
 }
 static DEVICE_ATTR(index_reg, 0444, rt5631_index_show, NULL);
 
-static int rt5631_probe(struct platform_device *pdev)
+static int rt5631_probe(struct snd_soc_codec *codec)
 {
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec;
-	int ret = 0;
-
-	if (rt5631_codec == NULL) {
-		dev_err(&pdev->dev, "Codec device not registered\n");
-		return -ENODEV;
-	}
-	socdev->card->codec = rt5631_codec;
-	codec = rt5631_codec;
-
-	ret = snd_soc_new_pcms(socdev, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to create pcms\n");
-		return -ENODEV;
-	}
-
-	snd_soc_add_controls(codec, rt5631_snd_controls,
-			ARRAY_SIZE(rt5631_snd_controls));
-	snd_soc_dapm_new_controls(codec, rt5631_dapm_widgets,
-			ARRAY_SIZE(rt5631_dapm_widgets));
-	snd_soc_dapm_add_routes(codec, rt5631_dapm_routes,
-			ARRAY_SIZE(rt5631_dapm_routes));
-
-	ret = device_create_file(codec->dev, &dev_attr_index_reg);
- 	if (ret < 0) {
- 		dev_err(codec->dev,
-			"Failed to create index_reg sysfs files: %d\n", ret);
-		goto err;
-	}
-
-	pr_info("%s initial ok!\n", codec->name);
-
-	return ret;
-
-err:
-	snd_soc_free_pcms(socdev);
-	return ret;
- }
-
-static int rt5631_remove(struct platform_device *pdev)
-{
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec = socdev->card->codec;
-
-	rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
-	device_remove_file(&pdev->dev, &dev_attr_index_reg);
-	snd_soc_free_pcms(socdev);
-	snd_soc_dapm_free(socdev);
-
-	return 0;
-}
-
-#ifdef CONFIG_PM
-static int rt5631_suspend(struct platform_device *pdev, pm_message_t state)
-{
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec = socdev->card->codec;
-
-	rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
-
-	return 0;
-}
-
-static int rt5631_resume(struct platform_device *pdev)
-{
-	struct snd_soc_device *socdev = platform_get_drvdata(pdev);
-	struct snd_soc_codec *codec = socdev->card->codec;
- 
-	rt5631_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
-	return 0;
-}
-#else
-#define rt5631_suspend NULL
-#define rt5631_resume NULL
-#endif
-
-struct snd_soc_codec_device soc_codec_dev_rt5631 = {
-	.probe = rt5631_probe,
-	.remove = rt5631_remove,
-	.suspend = rt5631_suspend,
-	.resume = rt5631_resume,
-};
-EXPORT_SYMBOL_GPL(soc_codec_dev_rt5631);
-
-#define RT5631_STEREO_RATES SNDRV_PCM_RATE_8000_96000
-#define RT5631_VOICE_RATES (SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_8000)
-#define RT5631_FORMAT	(SNDRV_PCM_FMTBIT_S16_LE | \
-			SNDRV_PCM_FMTBIT_S20_3LE | \
-			SNDRV_PCM_FMTBIT_S24_LE | \
-			SNDRV_PCM_FMTBIT_S8)
-
-struct snd_soc_dai_ops rt5631_ops = {
-	.hw_params = rt5631_hifi_pcm_params,
-	.set_fmt = rt5631_hifi_codec_set_dai_fmt,
-	.set_sysclk = rt5631_hifi_codec_set_dai_sysclk,
-	.set_pll = rt5631_codec_set_dai_pll,
-};
-
-struct snd_soc_dai rt5631_dai[] = {
-	{
-		.name = "rt5631-hifi",
-		.id = RT5631_AIF1,
-		.playback = {
-			.stream_name = "HIFI Playback",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = RT5631_STEREO_RATES,
-			.formats = RT5631_FORMAT,
-		},
-		.capture = {
-			.stream_name = "HIFI Capture",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = RT5631_STEREO_RATES,
-			.formats = RT5631_FORMAT,
-		},
-		.ops = &rt5631_ops,
-	},
-	{
-		.name = "rt5631-voice",
-		.id = RT5631_AIF2,
-		.playback = {
-			.stream_name = "Mono Playback",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = RT5631_VOICE_RATES,
-			.formats = RT5631_FORMAT,
-		},
-		.capture = {
-			.stream_name = "HIFI Capture",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = RT5631_VOICE_RATES,
-			.formats = RT5631_FORMAT,
-		},
-		.ops = &rt5631_ops,
-	},
-};
-
-static const struct i2c_device_id rt5631_i2c_id[] = {
-	{ "rt5631", 0 },
-	{ }
-};
-MODULE_DEVICE_TABLE(i2c, rt5631_i2c_id);
-
-static int rt5631_i2c_probe(struct i2c_client *i2c,
-		    const struct i2c_device_id *id)
-{
-	struct rt5631_priv *rt5631;
-	struct snd_soc_codec *codec;
+	struct rt5631_priv *rt5631 = snd_soc_codec_get_drvdata(codec);
 	unsigned int val;
-	int ret, i;
+	int ret;
 
-	rt5631 = kzalloc(sizeof(struct rt5631_priv), GFP_KERNEL);
-	if (NULL == rt5631)
-		return -ENOMEM;
-	codec = &rt5631->codec;
-
-	mutex_init(&codec->mutex);
-	INIT_LIST_HEAD(&codec->dapm_widgets);
-	INIT_LIST_HEAD(&codec->dapm_paths);
-
-	codec->control_data = i2c;
-	codec->dev = &i2c->dev;
-	codec->name = "RT5631";
-	codec->owner = THIS_MODULE;
-	codec->bias_level = SND_SOC_BIAS_OFF;
-	codec->set_bias_level = rt5631_set_bias_level;
-	codec->dai = rt5631_dai;
-	codec->num_dai = ARRAY_SIZE(rt5631_dai);
-	codec->reg_cache_size = RT5631_VENDOR_ID2 + 1;
-	codec->reg_cache_step = 1,
-	codec->reg_cache = kmemdup(rt5631_reg, sizeof(rt5631_reg), GFP_KERNEL);
-	codec->volatile_register = rt5631_volatile_register,
-	codec->readable_register = rt5631_readable_register,
-	snd_soc_codec_set_drvdata(codec, rt5631);
+	pr_info("Codec driver version %s\n", VERSION);
 
 	ret = snd_soc_codec_set_cache_io(codec, 8, 16, SND_SOC_I2C);
 	if (ret != 0) {
 		dev_err(codec->dev, "Failed to set cache I/O: %d\n", ret);
-		goto err;
+		return ret;
 	}
-
-	i2c_set_clientdata(i2c, rt5631);
-	rt5631_codec = codec;
 
 	val = rt5631_index_read(codec, RT5631_ADDA_MIXER_INTL_REG3);
 	if (val & 0x0002)
@@ -2241,48 +2067,165 @@ static int rt5631_i2c_probe(struct i2c_client *i2c,
 	}
 	rt5631_reg_init(codec);
 
-	codec->bias_level = SND_SOC_BIAS_STANDBY;
-	ret = snd_soc_register_codec(codec);
-	if (ret != 0) {
-		dev_err(&i2c->dev, "Failed to register codec: %d\n", ret);
-		goto err;
-	}
+	codec->dapm.bias_level = SND_SOC_BIAS_STANDBY;
+	rt5631->codec = codec;
 
-	for (i = 0; i < ARRAY_SIZE(rt5631_dai); i++)
-		rt5631_dai[i].dev = codec->dev;
-	ret = snd_soc_register_dais(rt5631_dai, ARRAY_SIZE(rt5631_dai));
-	if (ret != 0) {
-		dev_err(&i2c->dev, "Failed to register DAI: %d\n", ret);
-		goto err_codec;
+	snd_soc_add_controls(codec, rt5631_snd_controls,
+			ARRAY_SIZE(rt5631_snd_controls));
+	snd_soc_dapm_new_controls(&codec->dapm, rt5631_dapm_widgets,
+			ARRAY_SIZE(rt5631_dapm_widgets));
+	snd_soc_dapm_add_routes(&codec->dapm, rt5631_dapm_routes,
+			ARRAY_SIZE(rt5631_dapm_routes));
+
+	ret = device_create_file(codec->dev, &dev_attr_index_reg);
+ 	if (ret < 0) {
+ 		dev_err(codec->dev,
+			"Failed to create index_reg sysfs files: %d\n", ret);
+		return ret;
 	}
 
 	return 0;
+}
 
-err_codec:
-	snd_soc_unregister_codec(codec);
-err:
-	rt5631_codec = NULL;
-	kfree(rt5631);
+static int rt5631_remove(struct snd_soc_codec *codec)
+{
+	rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
+	return 0;
+}
+
+#ifdef CONFIG_PM
+static int rt5631_suspend(struct snd_soc_codec *codec, pm_message_t state)
+{
+	rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
+	return 0;
+}
+
+static int rt5631_resume(struct snd_soc_codec *codec)
+{
+	rt5631_set_bias_level(codec, SND_SOC_BIAS_STANDBY);
+	return 0;
+}
+#else
+#define rt5631_suspend NULL
+#define rt5631_resume NULL
+#endif
+
+#define RT5631_STEREO_RATES SNDRV_PCM_RATE_8000_96000
+#define RT5631_VOICE_RATES (SNDRV_PCM_RATE_16000 | SNDRV_PCM_RATE_8000)
+#define RT5631_FORMAT	(SNDRV_PCM_FMTBIT_S16_LE | \
+			SNDRV_PCM_FMTBIT_S20_3LE | \
+			SNDRV_PCM_FMTBIT_S24_LE | \
+			SNDRV_PCM_FMTBIT_S8)
+
+struct snd_soc_dai_ops rt5631_ops = {
+	.hw_params = rt5631_hifi_pcm_params,
+	.set_fmt = rt5631_hifi_codec_set_dai_fmt,
+	.set_sysclk = rt5631_hifi_codec_set_dai_sysclk,
+	.set_pll = rt5631_codec_set_dai_pll,
+};
+
+struct snd_soc_dai_driver rt5631_dai[] = {
+	{
+		.name = "rt5631-hifi",
+		.id = RT5631_AIF1,
+		.playback = {
+			.stream_name = "HIFI Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = RT5631_STEREO_RATES,
+			.formats = RT5631_FORMAT,
+		},
+		.capture = {
+			.stream_name = "HIFI Capture",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = RT5631_STEREO_RATES,
+			.formats = RT5631_FORMAT,
+		},
+		.ops = &rt5631_ops,
+	},
+	{
+		.name = "rt5631-voice",
+		.id = RT5631_AIF2,
+		.playback = {
+			.stream_name = "Mono Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = RT5631_VOICE_RATES,
+			.formats = RT5631_FORMAT,
+		},
+		.capture = {
+			.stream_name = "Voice HIFI Capture",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = RT5631_VOICE_RATES,
+			.formats = RT5631_FORMAT,
+		},
+		.ops = &rt5631_ops,
+	},
+};
+
+static struct snd_soc_codec_driver soc_codec_dev_rt5631 = {
+	.probe = rt5631_probe,
+	.remove = rt5631_remove,
+	.suspend = rt5631_suspend,
+	.resume = rt5631_resume,
+	.set_bias_level = rt5631_set_bias_level,
+	.reg_cache_size = RT5631_VENDOR_ID2 + 1,
+	.reg_word_size = sizeof(u16),
+	.reg_cache_default = rt5631_reg,
+	.volatile_register = rt5631_volatile_register,
+	.readable_register = rt5631_readable_register,
+	.reg_cache_step = 1,
+	/*.controls = rt5631_snd_controls,
+	.num_controls = ARRAY_SIZE(rt5631_snd_controls),
+	.dapm_widgets = rt5631_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(rt5631_dapm_widgets),
+	.dapm_routes = rt5631_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(rt5631_dapm_routes),*/
+};
+
+static const struct i2c_device_id rt5631_i2c_id[] = {
+	{ "rt5631", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, rt5631_i2c_id);
+
+static int rt5631_i2c_probe(struct i2c_client *i2c,
+		    const struct i2c_device_id *id)
+{
+	struct rt5631_priv *rt5631;
+	int ret;
+
+	rt5631 = kzalloc(sizeof(struct rt5631_priv), GFP_KERNEL);
+	if (NULL == rt5631)
+		return -ENOMEM;
+
+	i2c_set_clientdata(i2c, rt5631);
+
+	ret = snd_soc_register_codec(&i2c->dev, &soc_codec_dev_rt5631,
+			rt5631_dai, ARRAY_SIZE(rt5631_dai));
+	if (ret < 0)
+		kfree(rt5631);
+
 	return ret;
 }
 
 static __devexit int rt5631_i2c_remove(struct i2c_client *client)
 {
-	struct snd_soc_codec *codec = i2c_get_clientdata(client);
-
-	rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
-	snd_soc_unregister_dais(rt5631_dai, ARRAY_SIZE(rt5631_dai));
-	snd_soc_unregister_codec(codec);
+	snd_soc_unregister_codec(&client->dev);
 	kfree(i2c_get_clientdata(client));
-	rt5631_codec = NULL;
-
 	return 0;
 }
 
 static int rt5631_i2c_shutdown(struct i2c_client *client)
 {
-	struct snd_soc_codec *codec = i2c_get_clientdata(client);
-	rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
+	struct rt5631_priv *rt5631 = i2c_get_clientdata(client);
+	struct snd_soc_codec *codec = rt5631->codec;
+
+	if (codec != NULL)
+		rt5631_set_bias_level(codec, SND_SOC_BIAS_OFF);
+
 	return 0;
 }
 
@@ -2292,7 +2235,7 @@ struct i2c_driver rt5631_i2c_driver = {
 		.owner = THIS_MODULE,
 	},
 	.probe = rt5631_i2c_probe,
-	.remove   = __devexit_p(rt5631_i2c_remove),
+	.remove = __devexit_p(rt5631_i2c_remove),
 	.shutdown = rt5631_i2c_shutdown,
 	.id_table = rt5631_i2c_id,
 };
