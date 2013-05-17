@@ -8,6 +8,10 @@ config SND_SOC_I2C_AND_SPI
 	default y if I2C=y
 	default y if SPI_MASTER=y
 
+config SND_SOC_RT5631
+       tristate
+       depends on I2C
+
 config SND_SOC_ALL_CODECS
 	tristate "Build all ASoC CODEC drivers"
 	select SND_SOC_88PM860X if MFD_88PM860X
