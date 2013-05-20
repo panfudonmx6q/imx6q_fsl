@@ -1,6 +1,16 @@
 /*
- * imx-3stack-rt5631.c  
+ * imx-wm8962.c
  *
+ * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ */
+
+/*
+ * The code contained herein is licensed under the GNU General Public
+ * License. You may obtain a copy of the GNU General Public License
+ * Version 2 or later at the following locations:
+ *
+ * http://www.opensource.org/licenses/gpl-license.html
+ * http://www.gnu.org/copyleft/gpl.html
  */
 
 #include <linux/module.h>
@@ -16,133 +26,79 @@
 #include <linux/io.h>
 #include <linux/fsl_devices.h>
 #include <linux/slab.h>
+#include <linux/clk.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/initval.h>
-
+#include <sound/jack.h>
 #include <mach/dma.h>
 #include <mach/clock.h>
+#include <mach/audmux.h>
+#include <mach/gpio.h>
+#include <asm/mach-types.h>
 
-#include "../codecs/rt5631.h"
 #include "imx-ssi.h"
-#include "imx-pcm.h"
+#include "../codecs/wm8962.h"
 
-#if defined(CONFIG_MXC_ASRC) || defined(CONFIG_MXC_ASRC_MODULE)
-#include <linux/mxc_asrc.h>
-
-static unsigned int rt5631_rates[] = {
-	0,
-	32000,
-	44100,
-	48000,
-	96000,
-};
-
-struct asrc_esai {
-	unsigned int cpu_dai_rates;
-	unsigned int codec_dai_rates;
-	enum asrc_pair_index asrc_index;
-	unsigned int output_sample_rate;
-};
-
-static struct asrc_esai asrc_ssi_data;
-#endif
-
-/* SSI BCLK and LRC master */
-#define SGTL5000_SSI_MASTER	1
-
-#define CODEC_MCLK_INPUT_26M 1
-#define CODEC_MCLK_INPUT_24_576M 2
-#define CODEC_MCLK_INPUT_12M 3
-#define CODEC_MCLK_INPUT	 CODEC_MCLK_INPUT_24_576M//morrisCODEC_MCLK_INPUT_12M
-
-struct imx_3stack_priv {
-	int sysclk;
-	int hw;
+struct imx_priv {
+	int sysclk;         /*mclk from the outside*/
+	int codec_sysclk;
+	int dai_hifi;
+	int hp_irq;
+	int hp_status;
+	int amic_irq;
+	int amic_status;
 	struct platform_device *pdev;
 };
+unsigned int sample_format = SNDRV_PCM_FMTBIT_S16_LE;
+static struct imx_priv card_priv;
+static struct snd_soc_card snd_soc_card_imx;
+static struct snd_soc_codec *gcodec;
 
-static struct imx_3stack_priv card_priv;
-
-static int imx_3stack_audio_hw_params(struct snd_pcm_substream *substream,
-				      struct snd_pcm_hw_params *params)
+static int imx_hifi_startup(struct snd_pcm_substream *substream)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai_link *machine = rtd->dai;
-	struct snd_soc_dai *cpu_dai = machine->cpu_dai;
-	struct snd_soc_dai *codec_dai = machine->codec_dai;
-	struct imx_3stack_priv *priv = &card_priv;
-	unsigned int rate = params_rate(params);
-	struct imx_ssi *ssi_mode = (struct imx_ssi *)cpu_dai->private_data;
-	int ret = 0;
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct imx_priv *priv = &card_priv;
+	struct mxc_audio_platform_data *plat = priv->pdev->dev.platform_data;
 
+	if (!codec_dai->active)
+		plat->clock_enable(1);
+
+	return 0;
+}
+
+static void imx_hifi_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct imx_priv *priv = &card_priv;
+	struct mxc_audio_platform_data *plat = priv->pdev->dev.platform_data;
+
+	if (!codec_dai->active)
+		plat->clock_enable(0);
+
+	return;
+}
+
+static int imx_hifi_hw_params(struct snd_pcm_substream *substream,
+				     struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct imx_priv *priv = &card_priv;
 	unsigned int channels = params_channels(params);
+	unsigned int sample_rate = 44100;
+	int ret = 0;
 	u32 dai_format;
+	unsigned int pll_out;
 
-	/* only need to do this once as capture and playback are sync */
-	if (priv->hw)
-		return 0;
-	priv->hw = 1;
-
-#if defined(CONFIG_MXC_ASRC) || defined(CONFIG_MXC_ASRC_MODULE)
-	if ((asrc_ssi_data.output_sample_rate != 0)
-	    && (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)) {
-		unsigned int asrc_input_rate = rate;
-		unsigned int channel = params_channels(params);
-		struct mxc_runtime_data *pcm_data =
-		    substream->runtime->private_data;
-		struct asrc_config config;
-		struct mxc_audio_platform_data *plat;
-		struct imx_3stack_priv *priv = &card_priv;
-		int retVal = 0;
-		retVal = asrc_req_pair(channel, &asrc_ssi_data.asrc_index);
-		if (retVal < 0) {
-			pr_err("asrc_req_pair fail\n");
-			return -1;
-		}
-		config.pair = asrc_ssi_data.asrc_index;
-		config.channel_num = channel;
-		config.input_sample_rate = asrc_input_rate;
-		config.output_sample_rate = asrc_ssi_data.output_sample_rate;
-		config.inclk = INCLK_NONE;
-		config.word_width = 32;
-		plat = priv->pdev->dev.platform_data;
-		if (plat->src_port == 1)
-			config.outclk = OUTCLK_SSI1_TX;
-		else
-			config.outclk = OUTCLK_SSI2_TX;
-		retVal = asrc_config_pair(&config);
-		if (retVal < 0) {
-			pr_err("Fail to config asrc\n");
-			asrc_release_pair(asrc_ssi_data.asrc_index);
-			return retVal;
-		}
-		rate = asrc_ssi_data.output_sample_rate;
-		pcm_data->asrc_index = asrc_ssi_data.asrc_index;
-		pcm_data->asrc_enable = 1;
-	}
-#endif
-
-	//snd_soc_dai_set_sysclk(codec_dai, RT5631_SYSCLK, priv->sysclk, 0);
-	//snd_soc_dai_set_sysclk(codec_dai, RT5631_LRCLK, rate, 0);	
-	
-
-#if SGTL5000_SSI_MASTER
 	dai_format = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-	    SND_SOC_DAIFMT_CBM_CFM;
-#else
-	dai_format = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF |
-	    SND_SOC_DAIFMT_CBS_CFS;
-#endif
-
-	ssi_mode->sync_mode = 1;
-	if (channels == 1)
-		ssi_mode->network_mode = 0;
-	else
-		ssi_mode->network_mode = 1;
+		SND_SOC_DAIFMT_CBM_CFM;
 
 	/* set codec DAI configuration */
 	ret = snd_soc_dai_set_fmt(codec_dai, dai_format);
@@ -155,211 +111,100 @@ static int imx_3stack_audio_hw_params(struct snd_pcm_substream *substream,
 				 channels == 1 ? 0xfffffffe : 0xfffffffc,
 				 2, 32);
 
+	dai_format = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_IF |
+		SND_SOC_DAIFMT_CBM_CFM;
+
 	/* set cpu DAI configuration */
 	ret = snd_soc_dai_set_fmt(cpu_dai, dai_format);
 	if (ret < 0)
 		return ret;
 
-	/* set the SSI system clock as input (unused) */
-	snd_soc_dai_set_sysclk(cpu_dai, IMX_SSP_SYS_CLK, 0, SND_SOC_CLOCK_IN);
+	sample_rate = params_rate(params);
+	sample_format = params_format(params);
 
-#if (CODEC_MCLK_INPUT==CODEC_MCLK_INPUT_26M)	
+	if (sample_format == SNDRV_PCM_FORMAT_S24_LE)
+		pll_out = sample_rate * 192;
+	else
+		pll_out = sample_rate * 256;
 
-	if((24576000%rate)==0)	//for 8k,16k,32k,48k
-	{
-		snd_soc_dai_set_pll(codec_dai, 0,0,26000000, 24576000);
-		snd_soc_dai_set_sysclk(codec_dai,0, 24576000, SND_SOC_CLOCK_IN);	
-		
+	ret = snd_soc_dai_set_pll(codec_dai, WM8962_FLL_OSC,
+				  WM8962_FLL_OSC, priv->sysclk,
+				  pll_out);
+	if (ret < 0)
+		pr_err("Failed to start FLL: %d\n", ret);
+
+	ret = snd_soc_dai_set_sysclk(codec_dai,
+					 WM8962_SYSCLK_FLL,
+					 pll_out,
+					 SND_SOC_CLOCK_IN);
+	if (ret < 0) {
+		pr_err("Failed to set SYSCLK: %d\n", ret);
+		return ret;
 	}
-	else if((22579200%rate)==0)	//for 11k,22k,44k
-	{
-		snd_soc_dai_set_pll(codec_dai, 0,0,26000000, 22579200);
-		snd_soc_dai_set_sysclk(codec_dai,0, 22579200, SND_SOC_CLOCK_IN);			
-	}
-
-#elif(CODEC_MCLK_INPUT==CODEC_MCLK_INPUT_12M)
-
-   if((24576000%rate)==0)	//for 8k,16k,32k,48k
-	{
-		snd_soc_dai_set_pll(codec_dai, 0,0,12000000, 24576000);
-		snd_soc_dai_set_sysclk(codec_dai,0, 24576000, SND_SOC_CLOCK_IN);			
-	}
-   else if((22579200%rate)==0)	//for 11k,22k,44k
-	{
-		snd_soc_dai_set_pll(codec_dai, 0,0,12000000, 22579200);
-		snd_soc_dai_set_sysclk(codec_dai,0, 22579200, SND_SOC_CLOCK_IN);			
-	}
-
-
-
-#elif(CODEC_MCLK_INPUT==CODEC_MCLK_INPUT_24_576M)	
-	
-   if((24576000%rate)==0)	//for 8k,16k,32k,48k
-	{
-		snd_soc_dai_set_pll(codec_dai, 0,0,24576000, 24576000);
-		snd_soc_dai_set_sysclk(codec_dai,0, 24576000, SND_SOC_CLOCK_IN);			
-	}
-   else if((22579200%rate)==0)	//for 11k,22k,44k
-	{
-		snd_soc_dai_set_pll(codec_dai, 0,0,24576000, 22579200);
-		snd_soc_dai_set_sysclk(codec_dai,0, 22579200, SND_SOC_CLOCK_IN);			
-	}
-#endif
-
-
-	
 
 	return 0;
 }
 
-static int imx_3stack_startup(struct snd_pcm_substream *substream)
-{
-#if defined(CONFIG_MXC_ASRC) || defined(CONFIG_MXC_ASRC_MODULE)
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		if (asrc_ssi_data.output_sample_rate != 0) {
-			struct snd_soc_pcm_runtime *rtd =
-			    substream->private_data;
-			struct snd_soc_dai_link *pcm_link = rtd->dai;
-			struct snd_soc_dai *cpu_dai = pcm_link->cpu_dai;
-			struct snd_soc_dai *codec_dai = pcm_link->codec_dai;
-			asrc_ssi_data.cpu_dai_rates = cpu_dai->playback.rates;
-			asrc_ssi_data.codec_dai_rates =
-			    codec_dai->playback.rates;
-			cpu_dai->playback.rates =
-			    SNDRV_PCM_RATE_8000_192000 | SNDRV_PCM_RATE_KNOT;
-			codec_dai->playback.rates =
-			    SNDRV_PCM_RATE_8000_192000 | SNDRV_PCM_RATE_KNOT;
-		}
-	}
-#endif
-	return 0;
-}
-
-static void imx_3stack_shutdown(struct snd_pcm_substream *substream)
-{
-	struct imx_3stack_priv *priv = &card_priv;
-
-#if defined(CONFIG_MXC_ASRC) || defined(CONFIG_MXC_ASRC_MODULE)
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		if (asrc_ssi_data.output_sample_rate != 0) {
-			struct snd_soc_pcm_runtime *rtd =
-			    substream->private_data;
-			struct snd_soc_dai_link *pcm_link = rtd->dai;
-			struct snd_soc_dai *cpu_dai = pcm_link->cpu_dai;
-			struct snd_soc_dai *codec_dai = pcm_link->codec_dai;
-			codec_dai->playback.rates =
-			    asrc_ssi_data.codec_dai_rates;
-			cpu_dai->playback.rates = asrc_ssi_data.cpu_dai_rates;
-			asrc_release_pair(asrc_ssi_data.asrc_index);
-		}
-	}
-#endif
-
-	priv->hw = 0;
-}
-
-/*
- * imx_3stack SGTL5000 audio DAI opserations.
- */
-static struct snd_soc_ops imx_3stack_ops = {
-	.startup = imx_3stack_startup,
-	.shutdown = imx_3stack_shutdown,
-	.hw_params = imx_3stack_audio_hw_params,
+static const struct snd_kcontrol_new controls[] = {
+	SOC_DAPM_PIN_SWITCH("Ext Spk"),
 };
 
-static void imx_3stack_init_dam(int ssi_port, int dai_port)
-{
-	unsigned int ssi_ptcr = 0;
-	unsigned int dai_ptcr = 0;
-	unsigned int ssi_pdcr = 0;
-	unsigned int dai_pdcr = 0;
-	/* SGTL5000 uses SSI1 or SSI2 via AUDMUX port dai_port for audio */
+/* imx card dapm widgets */
+static const struct snd_soc_dapm_widget imx_dapm_widgets[] = {
+	SND_SOC_DAPM_HP("Headphone Jack", NULL),
+	SND_SOC_DAPM_SPK("Ext Spk", NULL),
+	SND_SOC_DAPM_MIC("AMIC", NULL),
+	SND_SOC_DAPM_MIC("DMIC", NULL),
+};
 
-	/* reset port ssi_port & dai_port */
-	__raw_writel(0, DAM_PTCR(ssi_port));
-	__raw_writel(0, DAM_PTCR(dai_port));
-	__raw_writel(0, DAM_PDCR(ssi_port));
-	__raw_writel(0, DAM_PDCR(dai_port));
-
-	/* set to synchronous */
-	ssi_ptcr |= AUDMUX_PTCR_SYN;
-	dai_ptcr |= AUDMUX_PTCR_SYN;
-
-#if SGTL5000_SSI_MASTER
-	/* set Rx sources ssi_port <--> dai_port */
-	ssi_pdcr |= AUDMUX_PDCR_RXDSEL(dai_port);
-	dai_pdcr |= AUDMUX_PDCR_RXDSEL(ssi_port);
-
-	/* set Tx frame direction and source  dai_port--> ssi_port output */
-	ssi_ptcr |= AUDMUX_PTCR_TFSDIR;
-	ssi_ptcr |= AUDMUX_PTCR_TFSSEL(AUDMUX_FROM_TXFS, dai_port);
-
-	/* set Tx Clock direction and source dai_port--> ssi_port output */
-	ssi_ptcr |= AUDMUX_PTCR_TCLKDIR;
-	ssi_ptcr |= AUDMUX_PTCR_TCSEL(AUDMUX_FROM_TXFS, dai_port);
-#else
-	/* set Rx sources ssi_port <--> dai_port */
-	ssi_pdcr |= AUDMUX_PDCR_RXDSEL(dai_port);
-	dai_pdcr |= AUDMUX_PDCR_RXDSEL(ssi_port);
-
-	/* set Tx frame direction and source  ssi_port --> dai_port output */
-	dai_ptcr |= AUDMUX_PTCR_TFSDIR;
-	dai_ptcr |= AUDMUX_PTCR_TFSSEL(AUDMUX_FROM_TXFS, ssi_port);
-
-	/* set Tx Clock direction and source ssi_port--> dai_port output */
-	dai_ptcr |= AUDMUX_PTCR_TCLKDIR;
-	dai_ptcr |= AUDMUX_PTCR_TCSEL(AUDMUX_FROM_TXFS, ssi_port);
-#endif
-
-	__raw_writel(ssi_ptcr, DAM_PTCR(ssi_port));
-	__raw_writel(dai_ptcr, DAM_PTCR(dai_port));
-	__raw_writel(ssi_pdcr, DAM_PDCR(ssi_port));
-	__raw_writel(dai_pdcr, DAM_PDCR(dai_port));
-}
-
-/* imx_3stack machine connections to the codec pins */
+/* imx machine connections to the codec pins */
 static const struct snd_soc_dapm_route audio_map[] = {
+	{ "Headphone Jack", NULL, "HPOUTL" },
+	{ "Headphone Jack", NULL, "HPOUTR" },
 
-	/* Mic Jack --> MIC_IN (with automatic bias) */
-	{"MIC1", NULL, "Mic Jack"},
+	{ "Ext Spk", NULL, "SPKOUTL" },
+	{ "Ext Spk", NULL, "SPKOUTR" },
 
-	/* Line in Jack --> AXIL&AXIR */
-	{"AXIL", NULL, "Line In Jack"},
-	{"AXIR", NULL, "Line In Jack"},
-	/* HP_OUT --> Headphone Jack */
-	{"Headphone Jack", NULL, "HPOL"},
-	{"Headphone Jack", NULL, "HPOR"},
-	/* LINE_OUT --> Ext Speaker */
-	{"Ext Spk", NULL, "SPOL"},
-	{"Ext Spk", NULL, "SPOR"},
+	{ "MICBIAS", NULL, "AMIC" },
+	{ "IN3R", NULL, "MICBIAS" },
+
+	{ "DMIC", NULL, "MICBIAS" },
+	{ "DMICDAT", NULL, "DMIC" },
+
 };
 
-static int rt5631_jack_func;
-static int rt5631_spk_func;
-static int rt5631_line_in_func;
-
-static void headphone_detect_handler(struct work_struct *work)
+static void headphone_detect_handler(struct work_struct *wor)
 {
-	struct imx_3stack_priv *priv = &card_priv;
+	struct imx_priv *priv = &card_priv;
 	struct platform_device *pdev = priv->pdev;
 	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
-	int hp_status;
+	char *envp[3];
+	char *buf;
 
-	sysfs_notify(&pdev->dev.kobj, NULL, "headphone");
-	hp_status = plat->hp_status();
-	if (hp_status)
-	{
-		/* Enable AMP when headphone remove */
-		plat->amp_enable(1);
-		set_irq_type(plat->hp_irq, IRQ_TYPE_EDGE_FALLING);
+	/*sysfs_notify(&pdev->dev.kobj, NULL, "headphone");*/
+	priv->hp_status = gpio_get_value(plat->hp_gpio);
+
+	/* setup a message for userspace headphone in */
+	buf = kmalloc(32, GFP_ATOMIC);
+	if (!buf) {
+		pr_err("%s kmalloc failed\n", __func__);
+		return;
 	}
+
+	if (priv->hp_status != plat->hp_active_low)
+		snprintf(buf, 32, "STATE=%d", 2);
 	else
-	{
-		/* Disable AMP when headphone insert */
-		plat->amp_enable(0);
-		set_irq_type(plat->hp_irq, IRQ_TYPE_EDGE_RISING);
-	}
-	enable_irq(plat->hp_irq);
+		snprintf(buf, 32, "STATE=%d", 0);
+
+	envp[0] = "NAME=headphone";
+	envp[1] = buf;
+	envp[2] = NULL;
+	kobject_uevent_env(&pdev->dev.kobj, KOBJ_CHANGE, envp);
+	kfree(buf);
+
+	enable_irq(priv->hp_irq);
+
+	return;
 }
 
 static DECLARE_DELAYED_WORK(hp_event, headphone_detect_handler);
@@ -373,396 +218,296 @@ static irqreturn_t imx_headphone_detect_handler(int irq, void *data)
 
 static ssize_t show_headphone(struct device_driver *dev, char *buf)
 {
-	struct imx_3stack_priv *priv = &card_priv;
+	struct imx_priv *priv = &card_priv;
 	struct platform_device *pdev = priv->pdev;
 	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
-	u16 hp_status;
 
 	/* determine whether hp is plugged in */
-	hp_status = plat->hp_status();
+	priv->hp_status = gpio_get_value(plat->hp_gpio);
 
-	if (hp_status == 0)
-		strcpy(buf, "speaker\n");
-	else
+	if (priv->hp_status != plat->hp_active_low)
 		strcpy(buf, "headphone\n");
+	else
+		strcpy(buf, "speaker\n");
 
 	return strlen(buf);
 }
 
 static DRIVER_ATTR(headphone, S_IRUGO | S_IWUSR, show_headphone, NULL);
 
-static const char *jack_function[] = { "off", "on"};
-
-static const char *spk_function[] = { "off", "on" };
-
-static const char *line_in_function[] = { "off", "on" };
-
-static const struct soc_enum rt5631_enum[] = {
-	SOC_ENUM_SINGLE_EXT(2, jack_function),
-	SOC_ENUM_SINGLE_EXT(2, spk_function),
-	SOC_ENUM_SINGLE_EXT(2, line_in_function),
-};
-
-static int rt5631_get_jack(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_value *ucontrol)
+static void amic_detect_handler(struct work_struct *work)
 {
-	ucontrol->value.enumerated.item[0] = rt5631_jack_func;
-	return 0;
-}
+	struct imx_priv *priv = &card_priv;
+	struct platform_device *pdev = priv->pdev;
+	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
+	char *envp[3];
+	char *buf;
 
-static int rt5631_set_jack(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
+	/* sysfs_notify(&pdev->dev.kobj, NULL, "amic"); */
+	priv->amic_status = gpio_get_value(plat->mic_gpio);
 
-	if (rt5631_jack_func == ucontrol->value.enumerated.item[0])
-		return 0;
-
-	rt5631_jack_func = ucontrol->value.enumerated.item[0];
-	if (rt5631_jack_func)
-		snd_soc_dapm_enable_pin(codec, "Headphone Jack");
+	/* if amic is inserted, disable dmic */
+	if (priv->amic_status != plat->mic_active_low)
+		snd_soc_dapm_nc_pin(&gcodec->dapm, "DMIC");
 	else
-		snd_soc_dapm_disable_pin(codec, "Headphone Jack");
+		snd_soc_dapm_enable_pin(&gcodec->dapm, "DMIC");
 
-	snd_soc_dapm_sync(codec);
-	return 1;
-}
+	/* setup a message for userspace headphone in */
+	buf = kmalloc(32, GFP_ATOMIC);
+	if (!buf) {
+		pr_err("%s kmalloc failed\n", __func__);
+		return;
+	}
 
-static int rt5631_get_spk(struct snd_kcontrol *kcontrol,
-			    struct snd_ctl_elem_value *ucontrol)
-{
-	ucontrol->value.enumerated.item[0] = rt5631_spk_func;
-	return 0;
-}
-
-static int rt5631_set_spk(struct snd_kcontrol *kcontrol,
-			    struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-
-	if (rt5631_spk_func == ucontrol->value.enumerated.item[0])
-		return 0;
-
-	rt5631_spk_func = ucontrol->value.enumerated.item[0];
-	if (rt5631_spk_func)
-		snd_soc_dapm_enable_pin(codec, "Ext Spk");
+	if (priv->amic_status == 0)
+		snprintf(buf, 32, "STATE=%d", 2);
 	else
-		snd_soc_dapm_disable_pin(codec, "Ext Spk");
+		snprintf(buf, 32, "STATE=%d", 0);
 
-	snd_soc_dapm_sync(codec);
-	return 1;
+	envp[0] = "NAME=amic";
+	envp[1] = buf;
+	envp[2] = NULL;
+	kobject_uevent_env(&pdev->dev.kobj, KOBJ_CHANGE, envp);
+	kfree(buf);
+
+	enable_irq(priv->amic_irq);
 }
 
-static int rt5631_get_line_in(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_value *ucontrol)
+static DECLARE_DELAYED_WORK(amic_event, amic_detect_handler);
+
+static irqreturn_t imx_amic_detect_handler(int irq, void *data)
 {
-	ucontrol->value.enumerated.item[0] = rt5631_line_in_func;
-	return 0;
+	disable_irq_nosync(irq);
+	schedule_delayed_work(&amic_event, msecs_to_jiffies(200));
+	return IRQ_HANDLED;
 }
 
-static int rt5631_set_line_in(struct snd_kcontrol *kcontrol,
-			     struct snd_ctl_elem_value *ucontrol)
+static ssize_t show_amic(struct device_driver *dev, char *buf)
 {
-	struct snd_soc_codec *codec = snd_kcontrol_chip(kcontrol);
-
-	if (rt5631_line_in_func == ucontrol->value.enumerated.item[0])
-		return 0;
-
-	rt5631_line_in_func = ucontrol->value.enumerated.item[0];
-	if (rt5631_line_in_func)
-		snd_soc_dapm_enable_pin(codec, "Line In Jack");
-	else
-		snd_soc_dapm_disable_pin(codec, "Line In Jack");
-
-	snd_soc_dapm_sync(codec);
-	return 1;
-}
-
-static int spk_amp_event(struct snd_soc_dapm_widget *w,
-			 struct snd_kcontrol *kcontrol, int event)
-{
-	struct imx_3stack_priv *priv = &card_priv;
+	struct imx_priv *priv = &card_priv;
 	struct platform_device *pdev = priv->pdev;
 	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
 
-	if (plat->amp_enable == NULL)
-		return 0;
+	/* determine whether amic is plugged in */
+	priv->amic_status = gpio_get_value(plat->hp_gpio);
 
-	if (SND_SOC_DAPM_EVENT_ON(event))
-		plat->amp_enable(1);
+	if (priv->amic_status != plat->mic_active_low)
+		strcpy(buf, "amic\n");
 	else
-		plat->amp_enable(0);
+		strcpy(buf, "dmic\n");
 
-	return 0;
+	return strlen(buf);
 }
 
-/* imx_3stack card dapm widgets */
-static const struct snd_soc_dapm_widget imx_3stack_dapm_widgets[] = {
-	SND_SOC_DAPM_MIC("Mic Jack", NULL),
-	SND_SOC_DAPM_LINE("Line In Jack", NULL),
-//	SND_SOC_DAPM_SPK("Ext Spk", spk_amp_event),
-	SND_SOC_DAPM_SPK("Ext Spk", NULL),
-	SND_SOC_DAPM_HP("Headphone Jack", NULL),
-};
+static DRIVER_ATTR(amic, S_IRUGO | S_IWUSR, show_amic, NULL);
 
-static const struct snd_kcontrol_new rt5631_machine_controls[] = {
-	SOC_ENUM_EXT("Jack Function", rt5631_enum[0], rt5631_get_jack,
-		     rt5631_set_jack),
-	SOC_ENUM_EXT("Speaker Function", rt5631_enum[1], rt5631_get_spk,
-		     rt5631_set_spk),
-	SOC_ENUM_EXT("Line In Function", rt5631_enum[1], rt5631_get_line_in,
-		     rt5631_set_line_in),
-};
-
-#if defined(CONFIG_MXC_ASRC) || defined(CONFIG_MXC_ASRC_MODULE)
-static int asrc_func;
-
-static const char *asrc_function[] = {
-	"disable", "32KHz", "44.1KHz", "48KHz", "96KHz" };
-
-static const struct soc_enum asrc_enum[] = {
-	SOC_ENUM_SINGLE_EXT(5, asrc_function),
-};
-
-static int asrc_get_rate(struct snd_kcontrol *kcontrol,
-			 struct snd_ctl_elem_value *ucontrol)
+static int imx_wm8962_init(struct snd_soc_pcm_runtime *rtd)
 {
-	ucontrol->value.enumerated.item[0] = asrc_func;
-	return 0;
-}
-
-static int asrc_set_rate(struct snd_kcontrol *kcontrol,
-			 struct snd_ctl_elem_value *ucontrol)
-{
-	if (asrc_func == ucontrol->value.enumerated.item[0])
-		return 0;
-
-	asrc_func = ucontrol->value.enumerated.item[0];
-	asrc_ssi_data.output_sample_rate = rt5631_rates[asrc_func];
-
-	return 1;
-}
-
-static const struct snd_kcontrol_new asrc_controls[] = {
-	SOC_ENUM_EXT("ASRC", asrc_enum[0], asrc_get_rate,
-		     asrc_set_rate),
-};
-#endif
-
-static int imx_3stack_rt5631_init(struct snd_soc_codec *codec)
-{
-	int i, ret;
-
-#if defined(CONFIG_MXC_ASRC) || defined(CONFIG_MXC_ASRC_MODULE)
-	for (i = 0; i < ARRAY_SIZE(asrc_controls); i++) {
-		ret = snd_ctl_add(codec->card,
-				  snd_soc_cnew(&asrc_controls[i], codec, NULL));
-		if (ret < 0)
-			return ret;
-	}
-	asrc_ssi_data.output_sample_rate = rt5631_rates[asrc_func];
-#endif
-
-	/* Add imx_3stack specific controls */
-	for (i = 0; i < ARRAY_SIZE(rt5631_machine_controls); i++) {
-		ret = snd_ctl_add(codec->card,
-				  snd_soc_cnew(&rt5631_machine_controls[i],
-					       codec, NULL));
-		if (ret < 0)
-			return ret;
-	}
-
-
-#if 1	
-	/* Add imx_3stack specific widgets */
-	snd_soc_dapm_new_controls(codec, imx_3stack_dapm_widgets,
-				  ARRAY_SIZE(imx_3stack_dapm_widgets));
-
-	/* Set up imx_3stack specific audio path audio_map */
-	snd_soc_dapm_add_routes(codec, audio_map, ARRAY_SIZE(audio_map));
-
-	snd_soc_dapm_disable_pin(codec, "Line In Jack");
-
-	snd_soc_dapm_sync(codec);
-
-#endif
-
-	return 0;
-}
-
-/* imx_3stack digital audio interface glue - connects codec <--> CPU */
-static struct snd_soc_dai_link imx_3stack_dai = {
-	.name = "RT5631",
-	.stream_name = "RT5631",
-	.codec_dai = &rt5631_dai[0],
-	.init = imx_3stack_rt5631_init,
-	.ops = &imx_3stack_ops,
-};
-
-static int imx_3stack_card_remove(struct platform_device *pdev)
-{
-	struct imx_3stack_priv *priv = &card_priv;
-	struct mxc_audio_platform_data *plat;
-	if (priv->pdev) {
-		plat = priv->pdev->dev.platform_data;
-		if (plat->finit)
-			plat->finit();
-	}
-
-	return 0;
-}
-
-static struct rt5631_setup_data rt5631_setup_data = {
-	.i2c_bus = 1,
-	.i2c_address = 0x1a,
-}; 
-
-static struct snd_soc_card snd_soc_card_imx_3stack = {
-	.name = "imx-3stack",
-	.platform = &imx_soc_platform,
-	.dai_link = &imx_3stack_dai,
-	.num_links = 1,
-	.remove = imx_3stack_card_remove,
-};
-
-static struct snd_soc_device imx_3stack_snd_devdata = {
-	.card = &snd_soc_card_imx_3stack,
-	.codec_dev = &soc_codec_dev_rt5631,
-	.codec_data = &rt5631_setup_data,
-};
-
-static int __devinit imx_3stack_rt5631_probe(struct platform_device *pdev)
-{
+	struct snd_soc_codec *codec = rtd->codec;
+	struct imx_priv *priv = &card_priv;
+	struct platform_device *pdev = priv->pdev;
 	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
-	struct imx_3stack_priv *priv = &card_priv;
-	struct snd_soc_dai *rt5631_cpu_dai;
-//	struct sgtl5000_setup_data *setup;
+	int ret = 0;
 
+	gcodec = rtd->codec;
+
+	/* Add imx specific widgets */
+	snd_soc_dapm_new_controls(&codec->dapm, imx_dapm_widgets,
+				  ARRAY_SIZE(imx_dapm_widgets));
+
+	/* Set up imx specific audio path audio_map */
+	snd_soc_dapm_add_routes(&codec->dapm, audio_map, ARRAY_SIZE(audio_map));
+
+	snd_soc_dapm_enable_pin(&codec->dapm, "Headphone Jack");
+	snd_soc_dapm_enable_pin(&codec->dapm, "AMIC");
+
+	snd_soc_dapm_sync(&codec->dapm);
+
+	if (plat->hp_gpio != -1) {
+			priv->hp_irq = gpio_to_irq(plat->hp_gpio);
+
+			ret = request_irq(priv->hp_irq,
+						imx_headphone_detect_handler,
+						IRQ_TYPE_EDGE_BOTH, pdev->name, priv);
+
+			if (ret < 0) {
+				ret = -EINVAL;
+				return ret;
+			}
+
+			ret = driver_create_file(pdev->dev.driver,
+							&driver_attr_headphone);
+			if (ret < 0) {
+				ret = -EINVAL;
+				return ret;
+			}
+		}
+
+	if (plat->mic_gpio != -1) {
+		priv->amic_irq = gpio_to_irq(plat->mic_gpio);
+
+		ret = request_irq(priv->amic_irq,
+					imx_amic_detect_handler,
+					IRQ_TYPE_EDGE_BOTH, pdev->name, priv);
+
+		if (ret < 0) {
+			ret = -EINVAL;
+			return ret;
+		}
+
+		ret = driver_create_file(pdev->dev.driver, &driver_attr_amic);
+		if (ret < 0) {
+			ret = -EINVAL;
+			return ret;
+		}
+
+		priv->amic_status = gpio_get_value(plat->mic_gpio);
+
+		/* if amic is inserted, disable DMIC */
+		if (priv->amic_status != plat->mic_active_low)
+			snd_soc_dapm_nc_pin(&codec->dapm, "DMIC");
+		else
+			snd_soc_dapm_enable_pin(&codec->dapm, "DMIC");
+	} else if (!snd_soc_dapm_get_pin_status(&codec->dapm, "DMICDAT"))
+		snd_soc_dapm_nc_pin(&codec->dapm, "DMIC");
+
+	return 0;
+}
+
+static struct snd_soc_ops imx_hifi_ops = {
+	.startup = imx_hifi_startup,
+	.shutdown = imx_hifi_shutdown,
+	.hw_params = imx_hifi_hw_params,
+};
+
+static struct snd_soc_dai_link imx_dai[] = {
+	{
+		.name = "HiFi",
+		.stream_name = "HiFi",
+		.codec_dai_name	= "rt5631",
+		.codec_name	= "rt5631.0-001a",
+		.cpu_dai_name	= "imx-ssi.1",
+		.platform_name	= "imx-pcm-audio.1",
+		.init		= imx_wm8962_init,
+		.ops		= &imx_hifi_ops,
+	},
+};
+
+static struct snd_soc_card snd_soc_card_imx = {
+	.name		= "rt5631-audio",
+	.dai_link	= imx_dai,
+	.num_links	= ARRAY_SIZE(imx_dai),
+};
+
+static int imx_audmux_config(int slave, int master)
+{
+	unsigned int ptcr, pdcr;
+	slave = slave - 1;
+	master = master - 1;
+
+	ptcr = MXC_AUDMUX_V2_PTCR_SYN |
+		MXC_AUDMUX_V2_PTCR_TFSDIR |
+		MXC_AUDMUX_V2_PTCR_TFSEL(master) |
+		MXC_AUDMUX_V2_PTCR_TCLKDIR |
+		MXC_AUDMUX_V2_PTCR_TCSEL(master);
+	pdcr = MXC_AUDMUX_V2_PDCR_RXDSEL(master);
+	mxc_audmux_v2_configure_port(slave, ptcr, pdcr);
+
+	ptcr = MXC_AUDMUX_V2_PTCR_SYN;
+	pdcr = MXC_AUDMUX_V2_PDCR_RXDSEL(slave);
+	mxc_audmux_v2_configure_port(master, ptcr, pdcr);
+
+	return 0;
+}
+
+/*
+ * This function will register the snd_soc_pcm_link drivers.
+ */
+static int __devinit imx_wm8962_probe(struct platform_device *pdev)
+{
+
+	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
+	struct imx_priv *priv = &card_priv;
 	int ret = 0;
 
 	priv->pdev = pdev;
 
-	gpio_activate_audio_ports();
-	imx_3stack_init_dam(plat->src_port, plat->ext_port);
+	imx_audmux_config(plat->src_port, plat->ext_port);
 
-	if (plat->src_port == 2)
-		rt5631_cpu_dai = imx_ssi_dai[2];
-	else if (plat->src_port == 1)
-		rt5631_cpu_dai = imx_ssi_dai[0];
-	else if (plat->src_port == 7)
-		rt5631_cpu_dai = imx_ssi_dai[4];
-
-
-	imx_3stack_dai.cpu_dai = rt5631_cpu_dai;
-
-	ret = driver_create_file(pdev->dev.driver, &driver_attr_headphone);
-	if (ret < 0) {
-		pr_err("%s:failed to create driver_attr_headphone\n", __func__);
-		goto sysfs_err;
+	if (plat->init && plat->init()) {
+		ret = -EINVAL;
+		return ret;
 	}
-
-	ret = -EINVAL;
-	if (plat->init && plat->init())
-		goto err_plat_init;
 
 	priv->sysclk = plat->sysclk;
 
-	/* The SGTL5000 has an internal reset that is deasserted 8 SYS_MCLK
-	   cycles after all power rails have been brought up. After this time
-	   communication can start */
-
-	if (plat->hp_status())
-		ret = request_irq(plat->hp_irq,
-				  imx_headphone_detect_handler,
-				  IRQ_TYPE_EDGE_FALLING, pdev->name, priv);
-	else
-		ret = request_irq(plat->hp_irq,
-				  imx_headphone_detect_handler,
-				  IRQ_TYPE_EDGE_RISING, pdev->name, priv);
-	if (ret < 0) {
-		pr_err("%s: request irq failed\n", __func__);
-		goto err_card_reg;
-	}
-#if 0
-	setup = kzalloc(sizeof(struct sgtl5000_setup_data), GFP_KERNEL);
-	if (!setup) {
-		pr_err("%s: kzalloc sgtl5000_setup_data failed\n", __func__);
-		goto err_card_reg;
-	}
-	setup->clock_enable = plat->clock_enable;
-	imx_3stack_snd_devdata.codec_data = setup;
-#endif
-	rt5631_jack_func = 1;
-	rt5631_spk_func = 1;
-	rt5631_line_in_func = 0;
-
-	return 0;
-
-err_card_reg:
-	if (plat->finit)
-		plat->finit();
-err_plat_init:
-	driver_remove_file(pdev->dev.driver, &driver_attr_headphone);
-sysfs_err:
 	return ret;
 }
 
-static int imx_3stack_rt5631_remove(struct platform_device *pdev)
+static int __devexit imx_wm8962_remove(struct platform_device *pdev)
 {
 	struct mxc_audio_platform_data *plat = pdev->dev.platform_data;
-	struct imx_3stack_priv *priv = &card_priv;
 
-	free_irq(plat->hp_irq, priv);
+	plat->clock_enable(0);
 
 	if (plat->finit)
 		plat->finit();
 
-	driver_remove_file(pdev->dev.driver, &driver_attr_headphone);
-
 	return 0;
 }
 
-static struct platform_driver imx_3stack_rt5631_audio_driver = {
-	.probe = imx_3stack_rt5631_probe,
-	.remove = imx_3stack_rt5631_remove,
+static struct platform_driver imx_wm8962_driver = {
+	.probe = imx_wm8962_probe,
+	.remove = imx_wm8962_remove,
 	.driver = {
-		   .name = "imx-3stack-rt5631",
+		   .name = "imx-rt5631",
+		   .owner = THIS_MODULE,
 		   },
 };
 
-static struct platform_device *imx_3stack_snd_device;
+static struct platform_device *imx_snd_device;
 
-static int __init imx_3stack_init(void)
+static int __init imx_asoc_init(void)
 {
 	int ret;
 
-	ret = platform_driver_register(&imx_3stack_rt5631_audio_driver);
-	if (ret)
-		return -ENOMEM;
+	ret = platform_driver_register(&imx_wm8962_driver);
+	if (ret < 0)
+		goto exit;
 
-	imx_3stack_snd_device = platform_device_alloc("soc-audio", 2);
-	if (!imx_3stack_snd_device)
-		return -ENOMEM;
+	if (machine_is_mx6q_sabresd())
+		imx_dai[0].codec_name = "rt5631.0-001a";
+	else if (machine_is_mx6sl_arm2() | machine_is_mx6sl_evk())
+		imx_dai[0].codec_name = "rt5631.1-001a";
 
-	platform_set_drvdata(imx_3stack_snd_device, &imx_3stack_snd_devdata);
-	imx_3stack_snd_devdata.dev = &imx_3stack_snd_device->dev;
-	ret = platform_device_add(imx_3stack_snd_device);
+	imx_snd_device = platform_device_alloc("soc-audio", 5);
+	if (!imx_snd_device)
+		goto err_device_alloc;
 
-	if (ret)
-		platform_device_put(imx_3stack_snd_device);
+	platform_set_drvdata(imx_snd_device, &snd_soc_card_imx);
 
+	ret = platform_device_add(imx_snd_device);
+
+	if (0 == ret)
+		goto exit;
+
+	platform_device_put(imx_snd_device);
+
+err_device_alloc:
+	platform_driver_unregister(&imx_wm8962_driver);
+exit:
 	return ret;
 }
 
-static void __exit imx_3stack_exit(void)
+static void __exit imx_asoc_exit(void)
 {
-	platform_driver_unregister(&imx_3stack_rt5631_audio_driver);
-	platform_device_unregister(imx_3stack_snd_device);
+	platform_driver_unregister(&imx_wm8962_driver);
+	platform_device_unregister(imx_snd_device);
 }
 
-module_init(imx_3stack_init);
-module_exit(imx_3stack_exit);
+module_init(imx_asoc_init);
+module_exit(imx_asoc_exit);
 
-MODULE_AUTHOR("flove");
-MODULE_DESCRIPTION("RT5631 Driver for i.MX 3STACK");
+/* Module information */
+MODULE_DESCRIPTION("ALSA SoC imx wm8962");
 MODULE_LICENSE("GPL");

@@ -2126,7 +2126,7 @@ struct snd_soc_dai_ops rt5631_ops = {
 
 struct snd_soc_dai_driver rt5631_dai[] = {
 	{
-		.name = "rt5631-hifi",
+		.name = "rt5631",
 		.id = RT5631_AIF1,
 		.playback = {
 			.stream_name = "HIFI Playback",
@@ -2145,7 +2145,7 @@ struct snd_soc_dai_driver rt5631_dai[] = {
 		.ops = &rt5631_ops,
 	},
 	{
-		.name = "rt5631-voice",
+		.name = "rt5631",
 		.id = RT5631_AIF2,
 		.playback = {
 			.stream_name = "Mono Playback",
