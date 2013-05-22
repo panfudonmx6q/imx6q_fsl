@@ -382,8 +382,8 @@ static struct snd_soc_ops imx_hifi_ops = {
 
 static struct snd_soc_dai_link imx_dai[] = {
 	{
-		.name = "HiFi",
-		.stream_name = "HiFi",
+		.name = "rt5631",
+		.stream_name = "rt5621",
 		.codec_dai_name	= "rt5631",
 		.codec_name	= "rt5631.0-001a",
 		.cpu_dai_name	= "imx-ssi.1",
