@@ -23,14 +23,6 @@ config SND_MXC_SOC_MX2
 config SND_MXC_SOC_SPDIF_DAI
 	tristate
 
-config SND_SOC_IMX_3STACK_RT5631
-       tristate "SoC Audio support for IMX - RT5631"
-       select SND_MXC_SOC_MX2
-       select SND_SOC_RT5631
-       help
-         Say Y if you want to add support for SoC audio on IMX 3STACK
-         with the RT5631.
-
 config SND_MXC_SOC_WM1133_EV1
 	tristate "Audio on the the i.MX31ADS with WM1133-EV1 fitted"
 	depends on MACH_MX31ADS_WM1133_EV1 && EXPERIMENTAL

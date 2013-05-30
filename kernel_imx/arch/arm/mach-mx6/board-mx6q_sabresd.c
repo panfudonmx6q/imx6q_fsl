@@ -389,7 +389,7 @@ static int mxc_wm8958_init(void)
 }
 
 static struct platform_device mx6_sabresd_audio_wm8962_device = {
-	.name = "imx-rt5631",
+	.name = "imx-wm8962",
 };
 
 static struct mxc_audio_platform_data wm8962_data;
@@ -778,7 +778,7 @@ static struct fsl_mxc_lightsensor_platform_data ls_data = {
 
 static struct i2c_board_info mxc_i2c0_board_info[] __initdata = {
 	{
-		I2C_BOARD_INFO("rt5631", 0x1a),
+		I2C_BOARD_INFO("wm8962", 0x1a),
 	},
 	{
 		I2C_BOARD_INFO("ov5642", 0x3c),
@@ -1786,7 +1786,7 @@ static void __init mx6_sabresd_board_init(void)
 		strcpy(mxc_i2c0_board_info[0].type, "wm8958");
 		mxc_i2c0_board_info[0].platform_data = &wm8958_config_data;
 	} else {
-		strcpy(mxc_i2c0_board_info[0].type, "rt5631");
+		strcpy(mxc_i2c0_board_info[0].type, "wm8962");
 		mxc_i2c0_board_info[0].platform_data = &wm8962_config_data;
 	}
 	imx6q_add_device_gpio_leds();

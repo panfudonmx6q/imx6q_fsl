@@ -22,8 +22,6 @@ snd-soc-imx-spdif-objs := imx-spdif.o
 snd-soc-imx-si4763-objs := imx-si4763.o
 snd-soc-imx-hdmi-objs := imx-hdmi.o imx-hdmi-dai.o imx-hdmi-dma.o hdmi_pcm.o
 
-snd-soc-imx-3stack-rt5631-objs := imx-3stack-rt5631.o
-obj-$(CONFIG_SND_SOC_IMX_3STACK_RT5631) += snd-soc-imx-3stack-rt5631.o
 obj-$(CONFIG_SND_SOC_EUKREA_TLV320) += snd-soc-eukrea-tlv320.o
 obj-$(CONFIG_SND_SOC_PHYCORE_AC97) += snd-soc-phycore-ac97.o
 obj-$(CONFIG_SND_SOC_MX27VIS_AIC32X4) += snd-soc-mx27vis-aic32x4.o

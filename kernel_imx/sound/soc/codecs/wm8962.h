@@ -17,14 +17,14 @@
 #include <sound/soc.h>
 
 #define WM8962_SYSCLK_MCLK 1
-#define WM8962_SYSCLK_FLL  2
+#define WM8962_SYSCLK_FLL  0
 #define WM8962_SYSCLK_PLL3 3
 
 #define WM8962_FLL  1
 
 #define WM8962_FLL_MCLK 1
 #define WM8962_FLL_BCLK 2
-#define WM8962_FLL_OSC  3
+#define WM8962_FLL_OSC  0
 #define WM8962_FLL_INT  4
 
 /*
