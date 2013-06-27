@@ -1838,6 +1838,8 @@ static void __init mx6_sabresd_board_init(void)
 	gpio_direction_output(SABRESD_CABC_EN0, 0);
 	gpio_request(SABRESD_CABC_EN1, "cabc-en1");
 	gpio_direction_output(SABRESD_CABC_EN1, 0);
+	gpio_request(SABRESD_EPDC_SDDO_15, "SENSOR_PWR_EN");
+	gpio_direction_output(SABRESD_EPDC_SDDO_15, 1);
 
 	imx6q_add_mxc_pwm(0);
 	imx6q_add_mxc_pwm(1);
